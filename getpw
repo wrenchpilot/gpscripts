@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Copies password from macOS keychain to clipboard or to STDOUT with `1` param
+# Requires macOS `application password` keychain defined below to be created by user.
+keychain="GlobalProtect"
+pw=$(security find-generic-password -a "${USER}" -s "${keychain}" -w)
+
+printf "%s" "${pw}" | pbcopy
+if [ $# -eq 1 ]
+then
+    pbpaste
+fi

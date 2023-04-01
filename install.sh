@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 
-cp -av gpcheck.sh gplogin.sh /usr/local/bin
+cp -av getpw gpcheck gplogin /usr/local/bin
