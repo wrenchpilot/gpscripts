@@ -8,7 +8,7 @@ A collection of command-line tools to automate GlobalProtect VPN operations on m
 
 - **macOS** with Homebrew installed
 - **GlobalProtect VPN client** installed and configured
-- **Duo 2FA** configured
+- **Duo 2FA** configured (*Yubikey preferred - Duo Push fallback under testing*)
 - **Yubikey** (optional, preferred for 2FA - falls back to Duo Push if not present)
 
 ### Installation
@@ -23,7 +23,10 @@ The install script will:
 
 - Detect your Homebrew installation (`/opt/homebrew` or `/usr/local`)
 - Copy all scripts to the appropriate `bin` directory
+- Configure username (defaults to current user, customizable)
+- Configure portal URL (optional, for environments where it's not pre-filled)
 - Set up secure password storage in macOS keychain
+- Store configuration as JSON in keychain for easy management
 - Make scripts available system-wide
 
 ### Basic Usage
@@ -94,15 +97,18 @@ gplogin --help        # Show help
 **Features:**
 
 - Automatic Yubikey detection (preferred method)
-- Fallback to Duo Push notifications
+- Fallback to Duo Push notifications (*currently under testing*)
 - Smart service management (doesn't restart running services)
 - Waits for authentication completion
+- Portal URL auto-fill (if configured during installation)
+- Smart popup detection and dismissal
+- Configurable username (set during installation)
 
 **Requirements:**
 
 - GlobalProtect app installed and configured
-- Duo 2FA configured (for automated login)
-- macOS keychain access (set up automatically)
+- Duo 2FA configured (for automated login - *Duo Push fallback currently under testing*)
+- macOS keychain access (credentials configured during installation)
 
 ### 🔌 `gpdisconnect` - Clean VPN Disconnect
 
@@ -117,7 +123,7 @@ gpdisconnect --help   # Show help
 
 ### 🔑 `gpupdatepw` - Update Credentials
 
-Updates the username and/or password stored in the macOS keychain. Useful when credentials change or if you need to reconfigure the username.
+Updates the username, password, and/or portal URL stored in the macOS keychain. Useful when credentials change or if you need to reconfigure settings.
 
 **Features:**
 
@@ -125,6 +131,7 @@ Updates the username and/or password stored in the macOS keychain. Useful when c
 - Interactive prompts for new credentials
 - Validates keychain operations
 - Handles username changes with automatic password migration
+- Can update portal URL configuration
 
 **Usage:**
 
@@ -133,6 +140,35 @@ gpupdatepw            # Update both username and password
 gpupdatepw -u         # Update only username
 gpupdatepw -p         # Update only password
 gpupdatepw --help     # Show help
+```
+
+## Configuration
+
+The scripts use macOS keychain for secure credential and configuration storage:
+
+### Keychain Entries
+
+- **`GlobalProtect`** - Stores your VPN password securely
+- **`GlobalProtect-Config`** - Stores configuration as JSON (username, portal URL)
+
+### Configuration Options
+
+During installation, you can configure:
+
+- **Username**: Defaults to current macOS user, but can be customized for different VPN usernames
+- **Portal URL**: Optional domain (e.g., `vpn.company.com`) for auto-filling portal fields
+- **Password**: Securely stored in keychain, prompted during installation
+
+### Manual Configuration
+
+If you need to manually add credentials:
+
+```bash
+# Add password to keychain
+security add-generic-password -a "your-username" -s "GlobalProtect" -w "your-password"
+
+# Add configuration to keychain  
+security add-generic-password -a "your-username" -s "GlobalProtect-Config" -w '{"username":"your-username","portal_url":"vpn.company.com"}'
 ```
 
 ## Compatibility
@@ -144,10 +180,12 @@ gpupdatepw --help     # Show help
 
 ## Security Considerations
 
-- Passwords are stored securely in macOS keychain.
-- No credentials stored in scripts
+- Passwords are stored securely in macOS keychain
+- Configuration stored as JSON in separate keychain entry
+- No credentials stored in scripts or log files
 - Minimal privilege requirements
 - Service management uses standard macOS tools
+- Portal URL and username are stored separately from password for better security isolation
 
 ## License
 
