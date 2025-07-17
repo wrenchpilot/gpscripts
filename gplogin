@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# Function to log messages
+log() {
+    echo "[gplogin] $1" >&2
+}
+
 # Function to show help
 show_help() {
     echo "Usage: gplogin [-h|--help]"
@@ -48,11 +53,6 @@ if [[ -z "$pw" ]]; then
     log "  security add-generic-password -a \"$u\" -s \"$keychain\" -w \"YOUR_PASSWORD\""
     exit 1
 fi
-
-# Function to log messages
-log() {
-    echo "[gplogin] $1" >&2
-}
 
 # Detect Yubikey presence
 has_yubikey() {
