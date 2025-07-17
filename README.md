@@ -44,6 +44,12 @@ gpupdatepw            # Update username/password in keychain
 ./uninstall.sh
 ```
 
+The uninstall script will:
+
+- Remove all scripts from the Homebrew bin directory
+- Clean up keychain entries (passwords and configuration)
+- Remove any legacy keychain entries from previous versions
+
 ## Overview
 
 These scripts provide automation for Palo Alto Networks GlobalProtect VPN client on macOS. Since GlobalProtect doesn't provide command-line authentication tools on macOS, the scripts use:
@@ -66,7 +72,7 @@ gpstatus --help       # Show help
 
 **Output Example:**
 
-```
+```text
 === GlobalProtect VPN Status ===
 GlobalProtect GUI service (pangpa): loaded
 GlobalProtect VPN service (pangps): loaded
