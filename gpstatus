@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# Determines if the Global Protect VPN is connected by checking the launchctl 
+# service status and optionally reading the UI for IP information.
+#
+# - If VPN is connected, the script exits with code 0.
+#
+# - If VPN is NOT connected, the script exits with code 1.
+#
+
+main() {
+  if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo "Usage: gpstatus [-h|--help]"
+    echo "Checks if GlobalProtect VPN is connected using native macOS networking tools."
+    echo "Exits 0 if connected, 1 if not."
+    exit 0
+  fi
+
+  echo "=== GlobalProtect VPN Status ==="
+  
+  # Check if GlobalProtect services are loaded
+  pangpa_loaded=$(launchctl list | grep -c "com.paloaltonetworks.gp.pangpa" || echo "0")
+  pangps_loaded=$(launchctl list | grep -c "com.paloaltonetworks.gp.pangps" || echo "0")
+  
+  echo "GlobalProtect GUI service (pangpa): $([[ "$pangpa_loaded" == "1" ]] && echo "loaded" || echo "not loaded")"
+  echo "GlobalProtect VPN service (pangps): $([[ "$pangps_loaded" == "1" ]] && echo "loaded" || echo "not loaded")"
+  
+  # Check default route to see if it goes through a utun interface (VPN)
+  default_route=$(route -n get default 2>/dev/null)
+  vpn_interface=""
+  vpn_gateway=""
+  
+  if echo "$default_route" | grep -q "interface: utun"; then
+    vpn_interface=$(echo "$default_route" | awk '/interface:/ {print $2}')
+    vpn_gateway=$(echo "$default_route" | awk '/gateway:/ {print $2}')
+    
+    # Get the VPN IP address assigned to this interface
+    vpn_ip=$(ifconfig "$vpn_interface" 2>/dev/null | awk '/inet / && !/inet6/ {print $2}' | head -1)
+    
+    if [[ -n "$vpn_ip" && -n "$vpn_gateway" ]]; then
+      echo ""
+      echo "✅ VPN is CONNECTED"
+      echo "   Interface: $vpn_interface"
+      echo "   VPN IP: $vpn_ip"
+      echo "   Gateway: $vpn_gateway"
+      
+      # Get MTU and additional interface info
+      mtu=$(ifconfig "$vpn_interface" 2>/dev/null | awk '/mtu/ {print $NF}')
+      echo "   MTU: ${mtu:-unknown}"
+      
+      # Show DNS servers if configured for this interface
+      dns_info=$(scutil --dns 2>/dev/null | grep -A 10 "resolver #.*$vpn_interface" | grep "nameserver" | head -3)
+      if [[ -n "$dns_info" ]]; then
+        echo "   DNS servers:"
+        echo "$dns_info" | sed 's/^/     /'
+      fi
+      
+      exit 0
+    fi
+  fi
+  
+  # Check for any utun interfaces with IPv4 addresses (backup method)
+  echo ""
+  echo "Checking all utun interfaces for VPN connections..."
+  utun_found=false
+  
+  for interface in $(ifconfig | awk '/^utun/ {print $1}' | sed 's/://'); do
+    ip=$(ifconfig "$interface" 2>/dev/null | awk '/inet / && !/inet6/ {print $2}' | head -1)
+    if [[ -n "$ip" ]]; then
+      echo "   $interface: $ip"
+      utun_found=true
+    fi
+  done
+  
+  if [[ "$utun_found" == "true" ]]; then
+    echo ""
+    echo "⚠️  VPN interfaces found but not set as default route"
+    echo "   This may indicate a partial VPN connection"
+    exit 1
+  fi
+  
+  # If no VPN detected
+  echo ""
+  if [[ "$pangps_loaded" == "1" ]]; then
+    echo "❌ VPN service is loaded but NOT connected"
+  else
+    echo "❌ VPN is NOT connected and service is not loaded"
+  fi
+  
+  exit 1
+}
+
+main "$@"

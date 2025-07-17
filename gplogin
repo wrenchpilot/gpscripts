@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+<<<<<<< HEAD
 u="${USER}"
 pw="$(getpw 1)"
 
@@ -19,3 +20,150 @@ tell application "System Events" to tell process "GlobalProtect"
 	click button 2 of window 1
 end tell
 EOF
+=======
+# Function to show help
+show_help() {
+    echo "Usage: gplogin [-h|--help]"
+    echo "Automates GlobalProtect VPN login with Duo 2FA support."
+    echo ""
+    echo "Features:"
+    echo "  - Automatic Yubikey detection (preferred method)"
+    echo "  - Fallback to Duo Push notifications"
+    echo "  - Smart service management"
+    echo "  - Waits for authentication completion"
+    echo "  - Configurable username (set during installation)"
+    echo ""
+    echo "Requirements:"
+    echo "  - GlobalProtect app installed"
+    echo "  - Duo 2FA configured"
+    echo "  - Username and password stored in macOS keychain (set up via install script)"
+    echo ""
+    echo "Exit codes:"
+    echo "  0 - Login successful"
+    echo "  1 - Login failed or error occurred"
+}
+
+# Check for help flag first
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_help
+    exit 0
+fi
+
+keychain="GlobalProtect"
+username_keychain="GlobalProtect-Username"
+
+# Get username from keychain first, fall back to system user
+u=$(security find-generic-password -a "${USER}" -s "${username_keychain}" -w 2>/dev/null)
+if [[ -z "$u" ]]; then
+    log "Username not found in keychain, using system username: ${USER}"
+    u="${USER}"
+else
+    log "Using configured username from keychain: $u"
+fi
+
+# Get password from macOS keychain
+pw=$(security find-generic-password -a "${u}" -s "${keychain}" -w 2>/dev/null)
+if [[ -z "$pw" ]]; then
+    log "Error: Password not found in keychain for user '${u}' and service '${keychain}'"
+    log "Run the install script to set up password storage, or add manually:"
+    log "  security add-generic-password -a \"$u\" -s \"$keychain\" -w \"YOUR_PASSWORD\""
+    exit 1
+fi
+
+# Function to log messages
+log() {
+    echo "[gplogin] $1" >&2
+}
+
+# Detect Yubikey presence
+has_yubikey() {
+    system_profiler SPUSBDataType 2>/dev/null | grep -qi 'Yubikey'
+}
+
+# Ensure GlobalProtect services are loaded
+log "Ensuring GlobalProtect services are loaded..."
+# Check if menu app service is running, if not load it
+if ! launchctl list | grep -q "com.paloaltonetworks.gp.pangpa"; then
+    log "Loading menu app service..."
+    launchctl load /Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist 2>/dev/null || true
+fi
+# Check if VPN service is running, if not load it
+if ! launchctl list | grep -q "com.paloaltonetworks.gp.pangps"; then
+    log "Loading VPN service..."
+    launchctl load /Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist 2>/dev/null || true
+fi
+
+# Check if GlobalProtect UI is running and ready
+log "Checking GlobalProtect UI status..."
+if pgrep -x "GlobalProtect" >/dev/null; then
+    log "GlobalProtect UI is already running."
+else
+    log "Starting GlobalProtect UI..."
+    # Only try to start if not already running
+    osascript -e 'tell application "GlobalProtect" to activate' 2>/dev/null || true
+    sleep 2
+fi
+
+sleep 1  # Brief pause to ensure UI is ready
+
+# AppleScript for login and detecting Duo prompt
+login_result=$(osascript <<EOF
+try
+    tell application "System Events"
+        if not (exists process "GlobalProtect") then
+            do shell script "echo '[gplogin] GlobalProtect process not found.' >&2"
+            return "error"
+        end if
+        tell process "GlobalProtect"
+            click menu bar item 1 of menu bar 2
+            delay 1
+            if exists (button 2 of window 1) then
+                click button 2 of window 1 -- Connect/Disconnect
+                delay 2
+                tell application "System Events"
+                    keystroke "$u"
+                    delay 0.2
+                    keystroke tab
+                    delay 0.2
+                    keystroke "$pw"
+                    delay 0.2
+                end tell
+                click button 2 of window 1
+                delay 2
+                if exists (window 1 whose name contains "Duo") then
+                    return "duo"
+                else
+                    return "noduo"
+                end if
+            else
+                do shell script "echo '[gplogin] GlobalProtect login dialog not found.' >&2"
+                return "error"
+            end if
+        end tell
+    end tell
+    return "success"
+on error errMsg
+    do shell script "echo '[gplogin] AppleScript error: ' & " & quoted form of errMsg & " >&2"
+    return "error"
+end try
+EOF
+)
+
+if [[ "$login_result" == "error" ]]; then
+    log "Login failed or GlobalProtect UI not found. Exiting."
+    exit 1
+fi
+
+if [[ "$login_result" == "duo" ]]; then
+    if has_yubikey; then
+        log "Yubikey detected. Please touch your Yubikey to continue authentication..."
+        sleep 8 # Wait for user to touch Yubikey
+    else
+        log "No Yubikey detected. Sending 'push1' for Duo Push."
+        osascript -e 'tell application "System Events" to keystroke "push1"'
+        sleep 2
+    fi
+else
+    log "No Duo prompt detected. Skipping 2FA step."
+fi
+>>>>>>> 8fc3ac2 (feat: Complete overhaul of GlobalProtect automation with enhanced security and usability)

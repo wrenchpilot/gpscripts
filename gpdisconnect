@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+# Function to log messages
+log() {
+    echo "[gpdisconnect] $1" >&2
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo "Usage: gpdisconnect [-h|--help]"
+    echo "Disconnects GlobalProtect VPN using launchctl."
+    exit 0
+fi
+
+log "Disconnecting GlobalProtect VPN..."
+
+# Disconnect only the VPN service (pangps), keeping the menu app (pangpa) running
+if launchctl unload /Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist 2>/dev/null; then
+    log "VPN disconnected successfully. GlobalProtect app remains running."
+    exit 0
+else
+    log "Failed to disconnect VPN service or VPN was already disconnected."
+    exit 1
+fi
