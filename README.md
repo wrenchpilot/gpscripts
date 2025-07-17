@@ -14,7 +14,7 @@ A collection of command-line tools to automate GlobalProtect VPN operations on m
 ### Installation
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/wrenchpilot/gpscripts.git
 cd gpscripts
 ./install.sh
 ```
