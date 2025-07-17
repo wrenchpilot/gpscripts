@@ -79,8 +79,8 @@ GlobalProtect VPN service (pangps): loaded
 
 ✅ VPN is CONNECTED
    Interface: utun4
-   VPN IP: 10.2.242.94
-   Gateway: 10.2.242.94
+   VPN IP: 10.x.x.x
+   Gateway: 10.x.x.x
    MTU: 1280
 ```
 
