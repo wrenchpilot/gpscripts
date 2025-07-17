@@ -29,7 +29,7 @@ echo ""
 
 # Handle keychain setup
 keychain="GlobalProtect"
-username_keychain="GlobalProtect-Username"
+config_keychain="GlobalProtect-Config"
 
 # Prompt for username configuration
 echo "=== Username Configuration ==="
@@ -47,6 +47,21 @@ fi
 
 echo ""
 
+# Prompt for portal URL configuration
+echo "=== Portal URL Configuration ==="
+echo "If GlobalProtect doesn't have the portal URL pre-filled, you can configure it here."
+echo "Enter just the domain (e.g., vpn.company.com), no protocol needed."
+echo ""
+read -p "Enter GlobalProtect portal URL (press Enter to skip): " portal_url
+
+if [[ -n "$portal_url" ]]; then
+    echo "Portal URL configured: $portal_url"
+else
+    echo "No portal URL configured - will use whatever is in the app"
+fi
+
+echo ""
+
 # Check if password exists in keychain
 if security find-generic-password -a "$account" -s "$keychain" >/dev/null 2>&1; then
     echo "✅ GlobalProtect password already exists in keychain."
@@ -56,19 +71,14 @@ else
     password_exists=false
 fi
 
-# Check if username is stored in keychain
-if security find-generic-password -a "$account" -s "$username_keychain" >/dev/null 2>&1; then
-    stored_username=$(security find-generic-password -a "$account" -s "$username_keychain" -w 2>/dev/null)
-    if [[ "$stored_username" == "$account" ]]; then
-        echo "✅ Username configuration already stored in keychain."
-        username_exists=true
-    else
-        echo "⚠️  Different username found in keychain, will update."
-        username_exists=false
-    fi
+# Check if configuration exists in keychain
+if security find-generic-password -a "$account" -s "$config_keychain" >/dev/null 2>&1; then
+    stored_config=$(security find-generic-password -a "$account" -s "$config_keychain" -w 2>/dev/null)
+    echo "✅ Configuration found in keychain."
+    config_exists=true
 else
-    echo "⚠️  Username configuration not found in keychain."
-    username_exists=false
+    echo "⚠️  Configuration not found in keychain."
+    config_exists=false
 fi
 
 # Set up password if needed
@@ -102,15 +112,22 @@ if [[ "$password_exists" == false ]]; then
 fi
 
 # Set up username storage if needed
-if [[ "$username_exists" == false ]]; then
+if [[ "$config_exists" == false ]]; then
     echo ""
-    echo "Storing username configuration in keychain..."
+    echo "Storing configuration in keychain..."
     
-    # Store username in keychain for retrieval by gplogin
-    if security add-generic-password -a "$account" -s "$username_keychain" -w "$account" 2>/dev/null; then
-        echo "✅ Username stored successfully in keychain!"
+    # Create JSON configuration
+    config_json="{\"username\":\"$account\""
+    if [[ -n "$portal_url" ]]; then
+        config_json+=",\"portal_url\":\"$portal_url\""
+    fi
+    config_json+="}"
+    
+    # Store configuration in keychain
+    if security add-generic-password -a "$account" -s "$config_keychain" -w "$config_json" 2>/dev/null; then
+        echo "✅ Configuration stored successfully in keychain!"
     else
-        echo "❌ Failed to store username in keychain."
+        echo "❌ Failed to store configuration in keychain."
         echo "gplogin will fall back to system username if needed."
     fi
 fi

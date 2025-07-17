@@ -34,7 +34,7 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
 fi
 
 keychain="GlobalProtect"
-username_keychain="GlobalProtect-Username"
+config_keychain="GlobalProtect-Config"
 
 # Check if VPN is already connected first
 log "Checking current VPN status..."
@@ -54,12 +54,28 @@ fi
 log "VPN not connected. Proceeding with login..."
 
 # Get username from keychain first, fall back to system user
-u=$(security find-generic-password -a "${USER}" -s "${username_keychain}" -w 2>/dev/null)
-if [[ -z "$u" ]]; then
-    log "Username not found in keychain, using system username: ${USER}"
-    u="${USER}"
+config_json=$(security find-generic-password -a "${USER}" -s "${config_keychain}" -w 2>/dev/null)
+if [[ -n "$config_json" ]]; then
+    # Parse JSON to extract username
+    u=$(echo "$config_json" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+    portal_url=$(echo "$config_json" | grep -o '"portal_url":"[^"]*"' | cut -d'"' -f4)
+    
+    if [[ -n "$u" ]]; then
+        log "Using configured username from keychain: $u"
+    else
+        log "Username not found in config, using system username: ${USER}"
+        u="${USER}"
+    fi
+    
+    if [[ -n "$portal_url" ]]; then
+        log "Portal URL configured: $portal_url"
+    else
+        log "No portal URL configured - will use app default"
+    fi
 else
-    log "Using configured username from keychain: $u"
+    log "Configuration not found in keychain, using system username: ${USER}"
+    u="${USER}"
+    portal_url=""
 fi
 
 # Get password from macOS keychain
