@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 
-<<<<<<< HEAD
-cp -av getpw gpcheck gplogin /usr/local/bin
-=======
 # Detect Homebrew prefix
 if command -v brew >/dev/null 2>&1; then
     HOMEBREW_PREFIX="$(brew --prefix)"
@@ -120,4 +117,3 @@ fi
 
 echo ""
 echo "Installation complete! All scripts are ready to use."
->>>>>>> 8fc3ac2 (feat: Complete overhaul of GlobalProtect automation with enhanced security and usability)

@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 
-<<<<<<< HEAD
-rm -rf /usr/local/bin/getpw
-rm -rf /usr/local/bin/gplogin
-rm -rf /usr/local/bin/gpcheck
-=======
 # Detect Homebrew prefix
 if command -v brew >/dev/null 2>&1; then
     HOMEBREW_PREFIX="$(brew --prefix)"
@@ -38,4 +33,3 @@ echo "  security delete-generic-password -a \"YOUR_USERNAME\" -s \"GlobalProtect
 
 echo ""
 echo "Uninstall complete."
->>>>>>> 8fc3ac2 (feat: Complete overhaul of GlobalProtect automation with enhanced security and usability)
