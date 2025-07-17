@@ -36,6 +36,23 @@ fi
 keychain="GlobalProtect"
 username_keychain="GlobalProtect-Username"
 
+# Check if VPN is already connected first
+log "Checking current VPN status..."
+if command -v gpstatus >/dev/null 2>&1; then
+    if gpstatus >/dev/null 2>&1; then
+        log "VPN is already connected. No need to login."
+        exit 0
+    fi
+else
+    # Fallback check without gpstatus
+    if route -n get default 2>/dev/null | grep -q "interface: utun"; then
+        log "VPN appears to be already connected. No need to login."
+        exit 0
+    fi
+fi
+
+log "VPN not connected. Proceeding with login..."
+
 # Get username from keychain first, fall back to system user
 u=$(security find-generic-password -a "${USER}" -s "${username_keychain}" -w 2>/dev/null)
 if [[ -z "$u" ]]; then
@@ -61,16 +78,43 @@ has_yubikey() {
 
 # Ensure GlobalProtect services are loaded
 log "Ensuring GlobalProtect services are loaded..."
-# Check if menu app service is running, if not load it
+
+# Always ensure menu app service is loaded
 if ! launchctl list | grep -q "com.paloaltonetworks.gp.pangpa"; then
     log "Loading menu app service..."
-    launchctl load /Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist 2>/dev/null || true
+    if ! launchctl load /Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist 2>/dev/null; then
+        log "Warning: Failed to load menu app service"
+    fi
+    sleep 1
 fi
-# Check if VPN service is running, if not load it
+
+# Handle VPN service loading (gpdisconnect unloads this)
 if ! launchctl list | grep -q "com.paloaltonetworks.gp.pangps"; then
-    log "Loading VPN service..."
-    launchctl load /Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist 2>/dev/null || true
+    log "VPN service not running. Loading VPN service..."
+    if ! launchctl load /Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist 2>/dev/null; then
+        log "Error: Failed to load VPN service"
+        exit 1
+    fi
+    sleep 3  # Give more time for service to fully start
+else
+    log "VPN service already running."
 fi
+
+# Double-check VPN service is responsive
+log "Verifying VPN service is ready..."
+for i in {1..5}; do
+    if launchctl list | grep -q "com.paloaltonetworks.gp.pangps"; then
+        log "VPN service is ready."
+        break
+    fi
+    if [[ $i -eq 5 ]]; then
+        log "Error: VPN service failed to start properly after multiple attempts."
+        log "Try restarting GlobalProtect application manually."
+        exit 1
+    fi
+    log "Waiting for VPN service... (attempt $i/5)"
+    sleep 2
+done
 
 # Check if GlobalProtect UI is running and ready
 log "Checking GlobalProtect UI status..."
@@ -85,8 +129,45 @@ fi
 
 sleep 1  # Brief pause to ensure UI is ready
 
+# Function to dismiss popups dynamically
+dismiss_popup() {
+    osascript <<'POPUP_EOF'
+tell application "System Events"
+    tell process "GlobalProtect"
+        if (count of windows) > 1 then
+            repeat with i from 1 to (count of windows)
+                try
+                    set windowTitle to name of window i
+                    -- Look for popup windows (not the main connect window)
+                    if not (exists (button 1 of window i whose name contains "Connect" or name contains "Disconnect")) then
+                        tell me to do shell script "echo '[gplogin] Popup detected: " & windowTitle & ", dismissing...' >&2"
+                        if exists (button "OK" of window i) then
+                            click button "OK" of window i
+                        else if exists (button "Accept" of window i) then
+                            click button "Accept" of window i
+                        else if exists (button "Continue" of window i) then
+                            click button "Continue" of window i
+                        else if exists (button "Close" of window i) then
+                            click button "Close" of window i
+                        else if exists (button "Agree" of window i) then
+                            click button "Agree" of window i
+                        else if exists (button 1 of window i) then
+                            click button 1 of window i
+                        end if
+                        delay 1
+                        return true
+                    end if
+                end try
+            end repeat
+        end if
+        return false
+    end tell
+end tell
+POPUP_EOF
+}
+
 # AppleScript for login and detecting Duo prompt
-login_result=$(osascript <<EOF
+login_result=$(timeout 45 osascript <<EOF
 try
     tell application "System Events"
         if not (exists process "GlobalProtect") then
@@ -94,28 +175,176 @@ try
             return "error"
         end if
         tell process "GlobalProtect"
+            -- Open the GlobalProtect menu/window
             click menu bar item 1 of menu bar 2
-            delay 1
-            if exists (button 2 of window 1) then
-                click button 2 of window 1 -- Connect/Disconnect
-                delay 2
-                tell application "System Events"
-                    keystroke "$u"
-                    delay 0.2
-                    keystroke tab
-                    delay 0.2
-                    keystroke "$pw"
-                    delay 0.2
-                end tell
-                click button 2 of window 1
-                delay 2
-                if exists (window 1 whose name contains "Duo") then
-                    return "duo"
+            delay 2
+            
+            -- Initial popup check and dismissal
+            repeat 3 times
+                if exists (window 1) then
+                    set windowTitle to name of window 1
+                    do shell script "echo '[gplogin] Found window: " & windowTitle & "' >&2"
+                    
+                    -- Check if this looks like a popup (no Connect/Disconnect buttons)
+                    set hasConnectButton to false
+                    set hasDisconnectButton to false
+                    
+                    try
+                        if exists (button 1 of window 1) then
+                            set button1Name to name of button 1 of window 1
+                            if button1Name contains "Connect" or button1Name contains "Disconnect" then
+                                set hasConnectButton to true
+                            end if
+                        end if
+                    end try
+                    
+                    try
+                        if exists (button 2 of window 1) then
+                            set button2Name to name of button 2 of window 1
+                            if button2Name contains "Connect" or button2Name contains "Disconnect" then
+                                set hasConnectButton to true
+                            end if
+                        end if
+                    end try
+                    
+                    -- If no Connect/Disconnect buttons, this is likely a popup
+                    if not hasConnectButton and not hasDisconnectButton then
+                        do shell script "echo '[gplogin] Initial popup detected: " & windowTitle & ", dismissing...' >&2"
+                        if exists (button "OK" of window 1) then
+                            click button "OK" of window 1
+                        else if exists (button "Accept" of window 1) then
+                            click button "Accept" of window 1
+                        else if exists (button "Continue" of window 1) then
+                            click button "Continue" of window 1
+                        else if exists (button "Close" of window 1) then
+                            click button "Close" of window 1
+                        else if exists (button "Agree" of window 1) then
+                            click button "Agree" of window 1
+                        else if exists (button 1 of window 1) then
+                            click button 1 of window 1
+                        end if
+                        delay 2
+                    else
+                        do shell script "echo '[gplogin] Main GlobalProtect window detected.' >&2"
+                        exit repeat
+                    end if
                 else
-                    return "noduo"
+                    exit repeat
+                end if
+            end repeat
+            
+            -- Now look for the main GlobalProtect window and check connection status
+            if not (exists (window 1)) then
+                do shell script "echo '[gplogin] No GlobalProtect window found after opening menu.' >&2"
+                return "error"
+            end if
+            
+            set windowTitle to name of window 1
+            do shell script "echo '[gplogin] Main window: " & windowTitle & "' >&2"
+            
+            -- Check if already connected by looking for "Disconnect" button
+            if exists (button 1 of window 1 whose name contains "Disconnect") then
+                do shell script "echo '[gplogin] Already connected - Disconnect button found.' >&2"
+                return "already_connected"
+            end if
+            
+            -- Look for Connect button and click it
+            if exists (button 1 of window 1 whose name contains "Connect") then
+                do shell script "echo '[gplogin] Found Connect button, clicking...' >&2"
+                click button 1 of window 1 whose name contains "Connect"
+                delay 2
+                
+                -- Check for popups after clicking Connect
+                repeat 3 times
+                    if (count of windows) > 1 then
+                        repeat with i from 1 to (count of windows)
+                            try
+                                set popupTitle to name of window i
+                                if not (exists (text field 1 of window i)) and not (exists (button 1 of window i whose name contains "Connect" or name contains "Disconnect")) then
+                                    do shell script "echo '[gplogin] Post-connect popup detected: " & popupTitle & ", dismissing...' >&2"
+                                    if exists (button "OK" of window i) then
+                                        click button "OK" of window i
+                                    else if exists (button "Accept" of window i) then
+                                        click button "Accept" of window i
+                                    else if exists (button "Continue" of window i) then
+                                        click button "Continue" of window i
+                                    else if exists (button 1 of window i) then
+                                        click button 1 of window i
+                                    end if
+                                    delay 1
+                                    exit repeat
+                                end if
+                            end try
+                        end repeat
+                    else
+                        exit repeat
+                    end if
+                    delay 1
+                end repeat
+                
+                -- Check if login dialog appeared
+                if exists (text field 1 of window 1) then
+                    do shell script "echo '[gplogin] Login dialog found, entering credentials...' >&2"
+                    tell application "System Events"
+                        keystroke "$u"
+                        delay 0.2
+                        keystroke tab
+                        delay 0.2
+                        keystroke "$pw"
+                        delay 0.2
+                    end tell
+                    
+                    -- Find and click the login/submit button
+                    if exists (button 1 of window 1 whose name contains "Sign In" or name contains "Login" or name contains "Submit") then
+                        click button 1 of window 1 whose name contains "Sign In" or name contains "Login" or name contains "Submit"
+                    else if exists (button 2 of window 1) then
+                        click button 2 of window 1
+                    else
+                        click button 1 of window 1
+                    end if
+                    delay 2
+                    
+                    -- Dynamic popup check after login
+                    repeat 5 times
+                        if (count of windows) > 1 then
+                            repeat with i from 1 to (count of windows)
+                                try
+                                    set popupTitle to name of window i
+                                    if not (exists (text field 1 of window i)) and not (popupTitle contains "Duo") then
+                                        do shell script "echo '[gplogin] Post-login popup detected: " & popupTitle & ", dismissing...' >&2"
+                                        if exists (button "OK" of window i) then
+                                            click button "OK" of window i
+                                        else if exists (button "Accept" of window i) then
+                                            click button "Accept" of window i
+                                        else if exists (button "Continue" of window i) then
+                                            click button "Continue" of window i
+                                        else if exists (button 1 of window i) then
+                                            click button 1 of window i
+                                        end if
+                                        delay 1
+                                        exit repeat
+                                    end if
+                                end try
+                            end repeat
+                        else
+                            exit repeat
+                        end if
+                        delay 0.5
+                    end repeat
+                    
+                    -- Check for Duo window
+                    if exists (window 1 whose name contains "Duo") then
+                        do shell script "echo '[gplogin] Duo authentication window detected.' >&2"
+                        return "duo"
+                    else
+                        return "noduo"
+                    end if
+                else
+                    do shell script "echo '[gplogin] No login dialog appeared - may already be authenticated.' >&2"
+                    return "no_login_needed"
                 end if
             else
-                do shell script "echo '[gplogin] GlobalProtect login dialog not found.' >&2"
+                do shell script "echo '[gplogin] No Connect button found in main window.' >&2"
                 return "error"
             end if
         end tell
@@ -128,9 +357,38 @@ end try
 EOF
 )
 
+# Check if the AppleScript timed out or failed
+if [[ $? -eq 124 ]]; then  # timeout exit code
+    log "AppleScript operation timed out after 45 seconds."
+    log "This may indicate a persistent popup or dialog that needs manual intervention."
+    exit 1
+fi
+
 if [[ "$login_result" == "error" ]]; then
     log "Login failed or GlobalProtect UI not found. Exiting."
     exit 1
+elif [[ "$login_result" == "already_connected" ]]; then
+    log "GlobalProtect is already connected (Disconnect button found)."
+    log "✅ VPN connection is active!"
+    echo ""
+    # Show current status
+    if command -v gpstatus >/dev/null 2>&1; then
+        gpstatus
+    fi
+    exit 0
+elif [[ "$login_result" == "no_login_needed" ]]; then
+    log "No login dialog appeared - connection may already be established."
+    # Wait a moment and check connection status
+    sleep 2
+    if command -v gpstatus >/dev/null 2>&1; then
+        if gpstatus >/dev/null 2>&1; then
+            log "✅ VPN connection confirmed!"
+            echo ""
+            gpstatus
+            exit 0
+        fi
+    fi
+    log "Connection status unclear. Proceeding with connection verification..."
 fi
 
 if [[ "$login_result" == "duo" ]]; then
@@ -144,4 +402,60 @@ if [[ "$login_result" == "duo" ]]; then
     fi
 else
     log "No Duo prompt detected. Skipping 2FA step."
+fi
+
+# Wait for login to complete and verify connection
+log "Waiting for VPN connection to establish..."
+connection_established=false
+
+for i in {1..30}; do  # Wait up to 30 seconds
+    sleep 1
+    
+    # Check if VPN is connected using gpstatus if available
+    if command -v gpstatus >/dev/null 2>&1; then
+        if gpstatus >/dev/null 2>&1; then
+            connection_established=true
+            break
+        fi
+    else
+        # Fallback check without gpstatus
+        if route -n get default 2>/dev/null | grep -q "interface: utun"; then
+            connection_established=true
+            break
+        fi
+    fi
+    
+    # Show progress every 5 seconds
+    if (( i % 5 == 0 )); then
+        log "Still waiting for connection... ($i/30 seconds)"
+    fi
+done
+
+# Report final status
+echo ""
+if [[ "$connection_established" == true ]]; then
+    log "✅ VPN connection established successfully!"
+    echo ""
+    
+    # Show detailed status if gpstatus is available
+    if command -v gpstatus >/dev/null 2>&1; then
+        gpstatus
+    else
+        log "Connection details:"
+        default_route=$(route -n get default 2>/dev/null)
+        if echo "$default_route" | grep -q "interface: utun"; then
+            vpn_interface=$(echo "$default_route" | awk '/interface:/ {print $2}')
+            vpn_gateway=$(echo "$default_route" | awk '/gateway:/ {print $2}')
+            vpn_ip=$(ifconfig "$vpn_interface" 2>/dev/null | awk '/inet / && !/inet6/ {print $2}' | head -1)
+            
+            echo "   Interface: $vpn_interface"
+            echo "   VPN IP: $vpn_ip"
+            echo "   Gateway: $vpn_gateway"
+        fi
+    fi
+    exit 0
+else
+    log "❌ VPN connection failed to establish within 30 seconds."
+    log "Check GlobalProtect logs or try again manually."
+    exit 1
 fi

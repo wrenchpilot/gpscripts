@@ -13,11 +13,27 @@ fi
 
 log "Disconnecting GlobalProtect VPN..."
 
+# Check if VPN service is actually running first
+if ! launchctl list | grep -q "com.paloaltonetworks.gp.pangps"; then
+    log "VPN service is not running. Nothing to disconnect."
+    exit 0
+fi
+
 # Disconnect only the VPN service (pangps), keeping the menu app (pangpa) running
 if launchctl unload /Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist 2>/dev/null; then
-    log "VPN disconnected successfully. GlobalProtect app remains running."
-    exit 0
+    # Give it a moment to properly unload
+    sleep 1
+    
+    # Verify it's actually unloaded
+    if ! launchctl list | grep -q "com.paloaltonetworks.gp.pangps"; then
+        log "VPN disconnected successfully. GlobalProtect app remains running."
+        log "Use 'gplogin' to reconnect when needed."
+        exit 0
+    else
+        log "Warning: VPN service may still be running after disconnect attempt."
+        exit 1
+    fi
 else
-    log "Failed to disconnect VPN service or VPN was already disconnected."
+    log "Failed to disconnect VPN service. It may already be disconnected."
     exit 1
 fi
