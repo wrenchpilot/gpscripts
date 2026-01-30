@@ -183,7 +183,11 @@ POPUP_EOF
 }
 
 # AppleScript for login and detecting Duo prompt
-login_result=$(timeout 45 osascript <<EOF
+tmp_ascript_out=$(mktemp /tmp/gplogin.ascript.XXXXXX)
+timeout_secs=45
+
+# Run the AppleScript in the background and capture only its stdout to a temp file
+osascript <<EOF >"$tmp_ascript_out" &
 try
     tell application "System Events"
         if not (exists process "GlobalProtect") then
@@ -371,11 +375,36 @@ on error errMsg
     return "error"
 end try
 EOF
-)
+as_pid=$!
+
+# Wait up to timeout_secs for the AppleScript to finish
+elapsed=0
+login_result=""
+while kill -0 "$as_pid" >/dev/null 2>&1; do
+    sleep 1
+    elapsed=$((elapsed+1))
+    if [[ $elapsed -ge $timeout_secs ]]; then
+        log "AppleScript operation exceeded ${timeout_secs}s, killing (pid $as_pid)"
+        kill -9 "$as_pid" >/dev/null 2>&1 || true
+        wait "$as_pid" 2>/dev/null || true
+        login_result="timeout"
+        break
+    fi
+done
+
+# If not timed out, collect the AppleScript's stdout (last non-empty line)
+if [[ "$login_result" != "timeout" ]]; then
+    wait "$as_pid" 2>/dev/null || true
+    # Grab the last non-empty line from the ascript stdout as the result
+    login_result=$(awk 'NF{line=$0} END{print line}' "$tmp_ascript_out" || true)
+fi
+
+# Clean up temp file
+rm -f "$tmp_ascript_out"
 
 # Check if the AppleScript timed out or failed
-if [[ $? -eq 124 ]]; then  # timeout exit code
-    log "AppleScript operation timed out after 45 seconds."
+if [[ "$login_result" == "timeout" ]]; then
+    log "AppleScript operation timed out after ${timeout_secs} seconds."
     log "This may indicate a persistent popup or dialog that needs manual intervention."
     exit 1
 fi
