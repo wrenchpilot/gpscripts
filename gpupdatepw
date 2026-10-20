@@ -1,38 +1,26 @@
 #!/usr/bin/env bash
 
-# Function to show help
 show_help() {
     echo "Usage: gpupdatepw [-h|--help] [-u|--username-only] [-p|--password-only]"
-    echo "Updates GlobalProtect username and/or password stored in macOS keychain."
+    echo "Updates the GlobalProtect username and/or password stored in macOS Keychain."
     echo ""
     echo "Options:"
-    echo "  -h, --help         Show this help message"
+    echo "  -h, --help          Show this help message"
     echo "  -u, --username-only Update only the username"
     echo "  -p, --password-only Update only the password"
     echo ""
     echo "Default behavior (no flags): Update both username and password"
-    echo ""
-    echo "Examples:"
-    echo "  gpupdatepw                # Update both username and password"
-    echo "  gpupdatepw -u             # Update only username"
-    echo "  gpupdatepw -p             # Update only password"
-    echo ""
-    echo "Exit codes:"
-    echo "  0 - Update successful"
-    echo "  1 - Update failed or error occurred"
+    echo "The password is entered at a secure Keychain prompt."
 }
 
-# Function to log messages
 log() {
     echo "[gpupdatepw] $1" >&2
 }
 
-# Parse command line arguments
 update_username=true
 update_password=true
-
 while [[ $# -gt 0 ]]; do
-    case $1 in
+    case "$1" in
         -h|--help)
             show_help
             exit 0
@@ -55,92 +43,94 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-keychain="GlobalProtect"
-username_keychain="GlobalProtect-Username"
-
-# Get current username from keychain if it exists
-current_username=$(security find-generic-password -a "${USER}" -s "${username_keychain}" -w 2>/dev/null)
-if [[ -z "$current_username" ]]; then
-    current_username="${USER}"
-    log "No username found in keychain, current default: ${USER}"
-else
-    log "Current username in keychain: $current_username"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Python 3 is required to read and update the keychain configuration." >&2
+    exit 1
 fi
 
-# Update username if requested
+CURRENT_USER="${USER:-$(id -un)}"
+keychain="GlobalProtect"
+config_keychain="GlobalProtect-Config"
+username_keychain="GlobalProtect-Username"
+
+# Read the current config under the stable local-account key. Older installs
+# keyed it by the VPN username, so try a service-only lookup as a migration path.
+config_json="$(security find-generic-password -a "$CURRENT_USER" -s "$config_keychain" -w 2>/dev/null || true)"
+if [[ -z "$config_json" ]]; then
+    config_json="$(security find-generic-password -s "$config_keychain" -w 2>/dev/null || true)"
+fi
+
+current_username=""
+if [[ -n "$config_json" ]]; then
+    current_username="$(printf '%s' "$config_json" | python3 -c 'import json, sys; value = json.load(sys.stdin).get("username", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)"
+fi
+if [[ -z "$current_username" ]]; then
+    current_username="$(security find-generic-password -a "$CURRENT_USER" -s "$username_keychain" -w 2>/dev/null || true)"
+fi
+if [[ -z "$current_username" ]]; then
+    current_username="$CURRENT_USER"
+    log "No configured VPN username found; using macOS username '$CURRENT_USER'."
+else
+    log "Current GlobalProtect username: $current_username"
+fi
+
+save_username_config() {
+    local new_username="$1"
+    local updated_config
+
+    updated_config="$(printf '%s' "$config_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, ValueError):
+    data = {}
+data["username"] = sys.argv[1]
+print(json.dumps(data))
+' "$new_username")" || return 1
+
+    if security add-generic-password -U -a "$CURRENT_USER" -s "$config_keychain" -w "$updated_config"; then
+        config_json="$updated_config"
+        return 0
+    fi
+    return 1
+}
+
 if [[ "$update_username" == true ]]; then
     echo "=== Update Username ==="
     echo "Current username: $current_username"
-    echo ""
-    read -p "Enter new GlobalProtect username (press Enter to keep current): " new_username
-    
+    read -r -p "Enter new GlobalProtect username (press Enter to keep current): " new_username
+
     if [[ -n "$new_username" && "$new_username" != "$current_username" ]]; then
-        log "Updating username from '$current_username' to '$new_username'..."
-        
-        # Delete old username entry if it exists
-        security delete-generic-password -a "${USER}" -s "${username_keychain}" 2>/dev/null || true
-        
-        # Add new username entry
-        if security add-generic-password -a "${USER}" -s "${username_keychain}" -w "$new_username" 2>/dev/null; then
-            log "✅ Username updated successfully!"
-            
-            # If we're also updating password, we need to check if password exists for new username
-            if [[ "$update_password" == true ]]; then
-                if ! security find-generic-password -a "$new_username" -s "$keychain" >/dev/null 2>&1; then
-                    log "⚠️  Password not found for new username '$new_username'"
-                    current_username="$new_username"  # Update for password section
-                else
-                    log "✅ Password already exists for new username '$new_username'"
-                    current_username="$new_username"
-                fi
-            fi
-            current_username="$new_username"
-        else
-            log "❌ Failed to update username in keychain"
+        if ! save_username_config "$new_username"; then
+            log "Failed to update username configuration in Keychain."
             exit 1
         fi
+        current_username="$new_username"
+        # Remove the obsolete username-only entry after the new config is saved.
+        security delete-generic-password -a "$CURRENT_USER" -s "$username_keychain" >/dev/null 2>&1 || true
+        log "Username updated successfully."
     elif [[ -n "$new_username" ]]; then
         log "Username unchanged."
     else
         log "Keeping current username: $current_username"
     fi
-    echo ""
+    echo
 fi
 
-# Update password if requested
 if [[ "$update_password" == true ]]; then
     echo "=== Update Password ==="
     echo "Username: $current_username"
-    echo ""
-    
-    # Check if password currently exists
-    if security find-generic-password -a "$current_username" -s "$keychain" >/dev/null 2>&1; then
-        echo "Password currently exists in keychain for user '$current_username'"
-        read -s -p "Enter new GlobalProtect password: " new_password
+    echo "Enter the password at the secure Keychain prompt."
+
+    # Omitting a value after -w makes `security` prompt without exposing the
+    # password in this script's arguments or process list. -U updates in place.
+    if security add-generic-password -U -a "$current_username" -s "$keychain" -w; then
+        log "Password updated successfully."
     else
-        echo "No password found in keychain for user '$current_username'"
-        read -s -p "Enter GlobalProtect password: " new_password
-    fi
-    echo ""
-    
-    if [[ -z "$new_password" ]]; then
-        log "❌ No password entered. Password not updated."
+        log "Failed to update password in Keychain."
         exit 1
     fi
-    
-    log "Updating password for user '$current_username'..."
-    
-    # Delete old password entry if it exists
-    security delete-generic-password -a "$current_username" -s "$keychain" 2>/dev/null || true
-    
-    # Add new password entry
-    if security add-generic-password -a "$current_username" -s "$keychain" -w "$new_password" 2>/dev/null; then
-        log "✅ Password updated successfully!"
-    else
-        log "❌ Failed to update password in keychain"
-        exit 1
-    fi
-    echo ""
+    echo
 fi
 
 log "Update complete! You can now use gplogin with the updated credentials."

@@ -3,27 +3,36 @@
 # Determines if the Global Protect VPN is connected by checking the launchctl 
 # service status and optionally reading the UI for IP information.
 #
-# - If VPN is connected, the script exits with code 0.
-#
-# - If VPN is NOT connected, the script exits with code 1.
+# - 0: GlobalProtect's VPN service is loaded and an IPv4 utun carries the default route.
+# - 1: No IPv4 utun interface was detected.
+# - 2: A utun exists but routing/service state cannot confirm GlobalProtect (for
+#      example, split tunneling or another utun-based service).
 #
 
 main() {
   if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: gpstatus [-h|--help]"
-    echo "Checks if GlobalProtect VPN is connected using native macOS networking tools."
-    echo "Exits 0 if connected, 1 if not."
+    echo "Checks VPN routing using native macOS networking tools."
+    echo "Exit 0: GlobalProtect service is loaded and default route uses IPv4 utun; exit 1: no IPv4 utun detected; exit 2: utun found but GlobalProtect status is ambiguous."
     exit 0
   fi
 
   echo "=== GlobalProtect VPN Status ==="
   
-  # Check if GlobalProtect services are loaded
-  pangpa_loaded=$(launchctl list | grep -c "com.paloaltonetworks.gp.pangpa" || echo "0")
-  pangps_loaded=$(launchctl list | grep -c "com.paloaltonetworks.gp.pangps" || echo "0")
+  # Check whether the GlobalProtect services are loaded.
+  if launchctl list | grep -Fq "com.paloaltonetworks.gp.pangpa"; then
+    pangpa_loaded=true
+  else
+    pangpa_loaded=false
+  fi
+  if launchctl list | grep -Fq "com.paloaltonetworks.gp.pangps"; then
+    pangps_loaded=true
+  else
+    pangps_loaded=false
+  fi
   
-  echo "GlobalProtect GUI service (pangpa): $([[ "$pangpa_loaded" == "1" ]] && echo "loaded" || echo "not loaded")"
-  echo "GlobalProtect VPN service (pangps): $([[ "$pangps_loaded" == "1" ]] && echo "loaded" || echo "not loaded")"
+  echo "GlobalProtect GUI service (pangpa): $([[ "$pangpa_loaded" == "true" ]] && echo "loaded" || echo "not loaded")"
+  echo "GlobalProtect VPN service (pangps): $([[ "$pangps_loaded" == "true" ]] && echo "loaded" || echo "not loaded")"
   
   # Check default route to see if it goes through a utun interface (VPN)
   default_route=$(route -n get default 2>/dev/null)
@@ -38,10 +47,19 @@ main() {
     vpn_ip=$(ifconfig "$vpn_interface" 2>/dev/null | awk '/inet / && !/inet6/ {print $2}' | head -1)
     
     if [[ -n "$vpn_ip" ]]; then
+      if [[ "$pangps_loaded" != "true" ]]; then
+        echo ""
+        echo "⚠️  The default route uses $vpn_interface, but the GlobalProtect VPN service is not loaded."
+        echo "   Another utun-based service may own this route; GlobalProtect status is ambiguous."
+        exit 2
+      fi
       echo ""
-      echo "✅ VPN is CONNECTED"
+      echo "✅ GlobalProtect VPN is CONNECTED"
       echo "   Interface: $vpn_interface"
       echo "   VPN IP: $vpn_ip"
+      if [[ -n "$vpn_gateway" ]]; then
+        echo "   Gateway: $vpn_gateway"
+      fi
       
       # Get MTU and additional interface info
       mtu=$(ifconfig "$vpn_interface" 2>/dev/null | awk '/mtu/ {print $NF}')
@@ -51,7 +69,7 @@ main() {
       dns_info=$(scutil --dns 2>/dev/null | grep -A 10 "resolver #.*$vpn_interface" | grep "nameserver" | head -3)
       if [[ -n "$dns_info" ]]; then
         echo "   DNS servers:"
-        echo "$dns_info" | sed 's/^/     /'
+        printf '%s\n' "$dns_info" | awk '{print "     " $0}'
       fi
       
       exit 0
@@ -73,14 +91,14 @@ main() {
   
   if [[ "$utun_found" == "true" ]]; then
     echo ""
-    echo "⚠️  VPN interfaces found but not set as default route"
-    echo "   This may indicate a partial VPN connection"
-    exit 1
+    echo "⚠️  utun interface(s) found, but the default route is elsewhere."
+    echo "   This may be a split-tunnel VPN or another utun-based service; status is ambiguous."
+    exit 2
   fi
   
   # If no VPN detected
   echo ""
-  if [[ "$pangps_loaded" == "1" ]]; then
+  if [[ "$pangps_loaded" == "true" ]]; then
     echo "❌ VPN service is loaded but NOT connected"
   else
     echo "❌ VPN is NOT connected and service is not loaded"

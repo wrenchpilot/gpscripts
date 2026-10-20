@@ -1,136 +1,88 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-# Detect Homebrew prefix
-if command -v brew >/dev/null 2>&1; then
-    HOMEBREW_PREFIX="$(brew --prefix)"
-else
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CURRENT_USER="${USER:-$(id -un)}"
+
+if ! command -v brew >/dev/null 2>&1; then
     echo "Homebrew not found. Please install Homebrew first." >&2
     exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Python 3 is required to safely encode the keychain configuration." >&2
+    exit 1
+fi
 
+HOMEBREW_PREFIX="$(brew --prefix)"
 TARGET_BIN="$HOMEBREW_PREFIX/bin"
+mkdir -p "$TARGET_BIN"
 
-# Make scripts executable
-chmod +x gpstatus gplogin gpdisconnect gpupdatepw
+for script in gpstatus gplogin gpdisconnect gpupdatepw; do
+    install -m 755 "$SCRIPT_DIR/$script" "$TARGET_BIN/$script"
+done
 
-# Copy all scripts
-cp -av gpstatus gplogin gpdisconnect gpupdatepw "$TARGET_BIN"
 echo "Installed scripts to $TARGET_BIN"
-
-echo ""
+echo
 echo "=== GlobalProtect Scripts Installation Complete ==="
-echo ""
+echo
 echo "Available commands:"
 echo "  gpstatus       - Check VPN connection status"
 echo "  gplogin        - Login to GlobalProtect VPN"
 echo "  gpdisconnect   - Disconnect from VPN"
 echo "  gpupdatepw     - Update username/password in keychain"
-echo ""
+echo
 
-# Handle keychain setup
 keychain="GlobalProtect"
 config_keychain="GlobalProtect-Config"
 
-# Prompt for username configuration
+# Configuration is keyed by the macOS account so gplogin can find it even
+# when the VPN username differs from the local account name.
 echo "=== Username Configuration ==="
-echo "Default username: ${USER}"
-echo ""
-read -p "Enter GlobalProtect username (press Enter to use '${USER}'): " custom_username
-
-if [[ -z "$custom_username" ]]; then
-    account="${USER}"
-    echo "Using system username: $account"
-else
-    account="$custom_username"
+echo "Default username: ${CURRENT_USER}"
+echo
+read -r -p "Enter GlobalProtect username (press Enter to use '${CURRENT_USER}'): " custom_username
+account="${custom_username:-$CURRENT_USER}"
+if [[ -n "$custom_username" ]]; then
     echo "Using custom username: $account"
+else
+    echo "Using system username: $account"
 fi
 
-echo ""
-
-# Prompt for portal URL configuration
+echo
 echo "=== Portal URL Configuration ==="
-echo "If GlobalProtect doesn't have the portal URL pre-filled, you can configure it here."
 echo "Enter just the domain (e.g., vpn.company.com), no protocol needed."
-echo ""
-read -p "Enter GlobalProtect portal URL (press Enter to skip): " portal_url
+echo "The URL is saved in the configuration; GlobalProtect may still require manual setup."
+echo
+read -r -p "Enter GlobalProtect portal URL (press Enter to skip): " portal_url
 
 if [[ -n "$portal_url" ]]; then
     echo "Portal URL configured: $portal_url"
 else
-    echo "No portal URL configured - will use whatever is in the app"
+    echo "No portal URL configured."
 fi
 
-echo ""
-
-# Check if password exists in keychain
+echo
 if security find-generic-password -a "$account" -s "$keychain" >/dev/null 2>&1; then
-    echo "✅ GlobalProtect password already exists in keychain."
-    password_exists=true
+    echo "GlobalProtect password already exists in keychain for '$account'."
 else
-    echo "⚠️  GlobalProtect password not found in keychain."
-    password_exists=false
+    echo "A GlobalProtect password is not yet stored for '$account'."
+    echo "Enter it at the secure Keychain prompt (the password is not passed as a command-line argument)."
+    if security add-generic-password -a "$account" -s "$keychain" -w; then
+        echo "Password stored successfully in keychain."
+    else
+        echo "Failed to store the password. You can add it later with:"
+        echo "  security add-generic-password -a \"$account\" -s \"$keychain\" -w"
+    fi
 fi
 
-# Check if configuration exists in keychain
-if security find-generic-password -a "$account" -s "$config_keychain" >/dev/null 2>&1; then
-    stored_config=$(security find-generic-password -a "$account" -s "$config_keychain" -w 2>/dev/null)
-    echo "✅ Configuration found in keychain."
-    config_exists=true
+config_json="$(python3 -c 'import json, sys; print(json.dumps({"username": sys.argv[1], "portal_url": sys.argv[2]}))' "$account" "$portal_url")"
+echo
+if security add-generic-password -U -a "$CURRENT_USER" -s "$config_keychain" -w "$config_json"; then
+    echo "Configuration stored in keychain for macOS account '$CURRENT_USER'."
 else
-    echo "⚠️  Configuration not found in keychain."
-    config_exists=false
+    echo "Failed to store GlobalProtect configuration in keychain." >&2
+    exit 1
 fi
 
-# Set up password if needed
-if [[ "$password_exists" == false ]]; then
-    echo ""
-    echo "Setting up password storage in macOS keychain..."
-    echo "Service: $keychain"
-    echo "Account: $account"
-    echo ""
-    
-    # Prompt for password
-    echo "Please enter your GlobalProtect password:"
-    read -s -p "Password: " password
-    echo ""
-    
-    if [[ -z "$password" ]]; then
-        echo "❌ No password entered. You can set this up later manually."
-        echo ""
-        echo "To add manually later:"
-        echo "  security add-generic-password -a \"$account\" -s \"$keychain\" -w \"YOUR_PASSWORD\""
-    else
-        # Add password to keychain
-        if security add-generic-password -a "$account" -s "$keychain" -w "$password" 2>/dev/null; then
-            echo "✅ Password stored successfully in keychain!"
-        else
-            echo "❌ Failed to store password in keychain."
-            echo "You may need to grant permission or add it manually:"
-            echo "  security add-generic-password -a \"$account\" -s \"$keychain\" -w \"YOUR_PASSWORD\""
-        fi
-    fi
-fi
-
-# Set up username storage if needed
-if [[ "$config_exists" == false ]]; then
-    echo ""
-    echo "Storing configuration in keychain..."
-    
-    # Create JSON configuration
-    config_json="{\"username\":\"$account\""
-    if [[ -n "$portal_url" ]]; then
-        config_json+=",\"portal_url\":\"$portal_url\""
-    fi
-    config_json+="}"
-    
-    # Store configuration in keychain
-    if security add-generic-password -a "$account" -s "$config_keychain" -w "$config_json" 2>/dev/null; then
-        echo "✅ Configuration stored successfully in keychain!"
-    else
-        echo "❌ Failed to store configuration in keychain."
-        echo "gplogin will fall back to system username if needed."
-    fi
-fi
-
-echo ""
+echo
 echo "Installation complete! All scripts are ready to use."

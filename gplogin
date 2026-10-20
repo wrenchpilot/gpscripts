@@ -33,15 +33,17 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
-keychain="GlobalProtect"
 config_keychain="GlobalProtect-Config"
 
 # Check if VPN is already connected first
 log "Checking current VPN status..."
+vpn_status=1
 if command -v gpstatus >/dev/null 2>&1; then
     if gpstatus >/dev/null 2>&1; then
         log "VPN is already connected. No need to login."
         exit 0
+    else
+        vpn_status=$?
     fi
 else
     # Fallback check without gpstatus
@@ -51,40 +53,42 @@ else
     fi
 fi
 
-log "VPN not connected. Proceeding with login..."
-
-# Get username from keychain first, fall back to system user
-config_json=$(security find-generic-password -a "${USER}" -s "${config_keychain}" -w 2>/dev/null)
-if [[ -n "$config_json" ]]; then
-    # Parse JSON to extract username
-    u=$(echo "$config_json" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
-    portal_url=$(echo "$config_json" | grep -o '"portal_url":"[^"]*"' | cut -d'"' -f4)
-    
-    if [[ -n "$u" ]]; then
-        log "Using configured username from keychain: $u"
-    else
-        log "Username not found in config, using system username: ${USER}"
-        u="${USER}"
-    fi
-    
-    if [[ -n "$portal_url" ]]; then
-        log "Portal URL configured: $portal_url"
-    else
-        log "No portal URL configured - will use app default"
-    fi
+if [[ "$vpn_status" -eq 2 ]]; then
+    log "VPN status is ambiguous (possibly split tunnel); checking GlobalProtect UI."
 else
-    log "Configuration not found in keychain, using system username: ${USER}"
-    u="${USER}"
-    portal_url=""
+    log "VPN is not confirmed connected. Proceeding with login."
 fi
 
-# Get password from macOS keychain
-pw=$(security find-generic-password -a "${u}" -s "${keychain}" -w 2>/dev/null)
-if [[ -z "$pw" ]]; then
-    log "Error: Password not found in keychain for user '${u}' and service '${keychain}'"
-    log "Run the install script to set up password storage, or add manually:"
-    log "  security add-generic-password -a \"$u\" -s \"$keychain\" -w \"YOUR_PASSWORD\""
+current_user="${USER:-$(id -un)}"
+if ! command -v python3 >/dev/null 2>&1; then
+    log "Python 3 is required to read the Keychain configuration."
     exit 1
+fi
+
+# New installations key configuration by the local macOS account. Fall back
+# to a service-only lookup for configurations written by older versions.
+config_json=$(security find-generic-password -a "$current_user" -s "$config_keychain" -w 2>/dev/null || true)
+if [[ -z "$config_json" ]]; then
+    config_json=$(security find-generic-password -s "$config_keychain" -w 2>/dev/null || true)
+fi
+
+u=""
+portal_url=""
+if [[ -n "$config_json" ]]; then
+    u=$(printf '%s' "$config_json" | python3 -c 'import json, sys; value = json.load(sys.stdin).get("username", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)
+    portal_url=$(printf '%s' "$config_json" | python3 -c 'import json, sys; value = json.load(sys.stdin).get("portal_url", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)
+fi
+
+if [[ -z "$u" ]]; then
+    u="$current_user"
+    log "No configured VPN username found; using macOS username: $u"
+else
+    log "Using configured username from keychain: $u"
+fi
+if [[ -n "$portal_url" ]]; then
+    log "Portal URL configured: $portal_url"
+else
+    log "No portal URL configured - will use app default"
 fi
 
 # Detect Yubikey presence
@@ -145,42 +149,9 @@ fi
 
 sleep 1  # Brief pause to ensure UI is ready
 
-# Function to dismiss popups dynamically
-dismiss_popup() {
-    osascript <<'POPUP_EOF'
-tell application "System Events"
-    tell process "GlobalProtect"
-        if (count of windows) > 1 then
-            repeat with i from 1 to (count of windows)
-                try
-                    set windowTitle to name of window i
-                    -- Look for popup windows (not the main connect window)
-                    if not (exists (button 1 of window i whose name contains "Connect" or name contains "Disconnect")) then
-                        tell me to do shell script "echo '[gplogin] Popup detected: " & windowTitle & ", dismissing...' >&2"
-                        if exists (button "OK" of window i) then
-                            click button "OK" of window i
-                        else if exists (button "Accept" of window i) then
-                            click button "Accept" of window i
-                        else if exists (button "Continue" of window i) then
-                            click button "Continue" of window i
-                        else if exists (button "Close" of window i) then
-                            click button "Close" of window i
-                        else if exists (button "Agree" of window i) then
-                            click button "Agree" of window i
-                        else if exists (button 1 of window i) then
-                            click button 1 of window i
-                        end if
-                        delay 1
-                        return true
-                    end if
-                end try
-            end repeat
-        end if
-        return false
-    end tell
-end tell
-POPUP_EOF
-}
+# Base64 keeps usernames/portal values safe inside the AppleScript source.
+username_b64=$(printf '%s' "$u" | /usr/bin/base64 | tr -d '\n')
+portal_url_b64=$(printf '%s' "$portal_url" | /usr/bin/base64 | tr -d '\n')
 
 # AppleScript for login and detecting Duo prompt
 tmp_ascript_out=$(mktemp /tmp/gplogin.ascript.XXXXXX)
@@ -189,6 +160,8 @@ timeout_secs=45
 # Run the AppleScript in the background and capture only its stdout to a temp file
 osascript <<EOF >"$tmp_ascript_out" &
 try
+    set configuredUsername to do shell script "/usr/bin/printf %s " & quoted form of "$username_b64" & " | /usr/bin/base64 -D"
+    set configuredPortal to do shell script "/usr/bin/printf %s " & quoted form of "$portal_url_b64" & " | /usr/bin/base64 -D"
     tell application "System Events"
         if not (exists process "GlobalProtect") then
             do shell script "echo '[gplogin] GlobalProtect process not found.' >&2"
@@ -268,6 +241,34 @@ try
                 return "already_connected"
             end if
             
+            -- Apply the saved portal only to a field that is explicitly labeled.
+            if configuredPortal is not "" then
+                set portalFieldFound to false
+                try
+                    repeat with candidateField in (text fields of window 1)
+                        set fieldLabel to ""
+                        try
+                            set fieldLabel to (description of candidateField) as text
+                        end try
+                        if fieldLabel is "" then
+                            try
+                                set fieldLabel to (name of candidateField) as text
+                            end try
+                        end if
+                        if fieldLabel contains "Portal" or fieldLabel contains "portal" then
+                            set value of candidateField to configuredPortal
+                            set portalFieldFound to true
+                            exit repeat
+                        end if
+                    end repeat
+                end try
+                if portalFieldFound then
+                    do shell script "echo '[gplogin] Applied the configured portal URL.' >&2"
+                else
+                    do shell script "echo '[gplogin] No labeled portal field found; configure the portal in GlobalProtect if needed.' >&2"
+                end if
+            end if
+
             -- Look for Connect button and click it
             if exists (button 1 of window 1 whose name contains "Connect") then
                 do shell script "echo '[gplogin] Found Connect button, clicking...' >&2"
@@ -305,12 +306,18 @@ try
                 -- Check if login dialog appeared
                 if exists (text field 1 of window 1) then
                     do shell script "echo '[gplogin] Login dialog found, entering credentials...' >&2"
+                    try
+                        set loginPassword to do shell script "/usr/bin/security find-generic-password -a " & quoted form of configuredUsername & " -s 'GlobalProtect' -w"
+                    on error
+                        do shell script "echo '[gplogin] Password not found in Keychain; run gpupdatepw to set it.' >&2"
+                        return "missing_password"
+                    end try
                     tell application "System Events"
-                        keystroke "$u"
+                        keystroke configuredUsername
                         delay 0.2
                         keystroke tab
                         delay 0.2
-                        keystroke "$pw"
+                        keystroke loginPassword
                         delay 0.2
                     end tell
                     
@@ -403,6 +410,11 @@ fi
 rm -f "$tmp_ascript_out"
 
 # Check if the AppleScript timed out or failed
+if [[ "$login_result" == "missing_password" ]]; then
+    log "No GlobalProtect password is stored for '$u'. Run gpupdatepw to set it."
+    exit 1
+fi
+
 if [[ "$login_result" == "timeout" ]]; then
     log "AppleScript operation timed out after ${timeout_secs} seconds."
     log "This may indicate a persistent popup or dialog that needs manual intervention."

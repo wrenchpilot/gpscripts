@@ -6,7 +6,7 @@ A collection of command-line tools to automate GlobalProtect VPN operations on m
 
 ### Prerequisites
 
-- **macOS** with Homebrew installed
+- **macOS** with Homebrew and Python 3 installed
 - **GlobalProtect VPN client** installed and configured
 - **Duo 2FA** configured (*Yubikey preferred - Duo Push fallback under testing*)
 - **Yubikey** (optional, preferred for 2FA - falls back to Duo Push if not present)
@@ -24,7 +24,7 @@ The install script will:
 - Detect your Homebrew installation (`/opt/homebrew` or `/usr/local`)
 - Copy all scripts to the appropriate `bin` directory
 - Configure username (defaults to current user, customizable)
-- Configure portal URL (optional, for environments where it's not pre-filled)
+- Save an optional portal URL; `gplogin` fills it only when the app exposes a clearly labeled portal field, otherwise configure it in GlobalProtect manually
 - Set up secure password storage in macOS keychain
 - Store configuration as JSON in keychain for easy management
 - Make scripts available system-wide
@@ -77,7 +77,7 @@ gpstatus --help       # Show help
 GlobalProtect GUI service (pangpa): loaded
 GlobalProtect VPN service (pangps): loaded
 
-✅ VPN is CONNECTED
+✅ GlobalProtect VPN is CONNECTED
    Interface: utun4
    VPN IP: x.x.x.x
    MTU: 1280
@@ -85,8 +85,9 @@ GlobalProtect VPN service (pangps): loaded
 
 **Exit Codes:**
 
-- `0` - VPN is connected
-- `1` - VPN is not connected
+- `0` - GlobalProtect's VPN service is loaded and the default route uses an IPv4 `utun` interface
+- `1` - No IPv4 `utun` interface was detected
+- `2` - A `utun` interface exists but routing or service state cannot confirm GlobalProtect (for example, split tunneling or another utun-based service)
 
 ### 🔐 `gplogin` - Automated VPN Login
 
@@ -105,7 +106,7 @@ gplogin --help        # Show help
 - Fallback to Duo Push notifications (*currently under testing*)
 - Smart service management (doesn't restart running services)
 - Waits for authentication completion
-- Portal URL auto-fill (if configured during installation)
+- Fills a configured portal URL only when the UI exposes a clearly labeled portal field; otherwise reports that manual configuration may be needed
 - Smart popup detection and dismissal
 - Configurable username (set during installation)
 
@@ -128,15 +129,14 @@ gpdisconnect --help   # Show help
 
 ### 🔑 `gpupdatepw` - Update Credentials
 
-Updates the username, password, and/or portal URL stored in the macOS keychain. Useful when credentials change or if you need to reconfigure settings.
+Updates the username and/or password stored in the macOS Keychain. Useful when credentials change.
 
 **Features:**
 
 - Update username only, password only, or both
 - Interactive prompts for new credentials
 - Validates keychain operations
-- Handles username changes with automatic password migration
-- Can update portal URL configuration
+- Saves username changes to the same configuration `gplogin` reads; set the password separately for a newly selected username
 
 **Usage:**
 
@@ -161,7 +161,7 @@ The scripts use macOS keychain for secure credential and configuration storage:
 During installation, you can configure:
 
 - **Username**: Defaults to current macOS user, but can be customized for different VPN usernames
-- **Portal URL**: Optional domain (e.g., `vpn.company.com`) for auto-filling portal fields
+- **Portal URL**: Optional domain (e.g., `vpn.company.com`); `gplogin` only fills it when GlobalProtect exposes a clearly labeled portal field
 - **Password**: Securely stored in keychain, prompted during installation
 
 ### Manual Configuration
@@ -169,11 +169,11 @@ During installation, you can configure:
 If you need to manually add credentials:
 
 ```bash
-# Add password to keychain
-security add-generic-password -a "your-username" -s "GlobalProtect" -w "your-password"
+# Add password to keychain; security prompts for it without putting it in shell history/process arguments
+security add-generic-password -a "your-username" -s "GlobalProtect" -w
 
-# Add configuration to keychain  
-security add-generic-password -a "your-username" -s "GlobalProtect-Config" -w '{"username":"your-username","portal_url":"vpn.company.com"}'
+# Configuration is keyed by your macOS account, while its username is the VPN account
+security add-generic-password -U -a "$(whoami)" -s "GlobalProtect-Config" -w '{"username":"your-username","portal_url":"vpn.company.com"}'
 ```
 
 ## Compatibility
@@ -185,7 +185,7 @@ security add-generic-password -a "your-username" -s "GlobalProtect-Config" -w '{
 
 ## Security Considerations
 
-- Passwords are stored securely in macOS keychain
+- Passwords are stored in macOS Keychain and entered through its prompt rather than passed as command-line arguments
 - Configuration stored as JSON in separate keychain entry
 - No credentials stored in scripts or log files
 - Minimal privilege requirements
